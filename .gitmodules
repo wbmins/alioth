@@ -1,0 +1,3 @@
+[submodule "pmaports-alioth"]
+	path = pmaports-alioth
+	url = https://github.com/wbmins/pmaports-alioth

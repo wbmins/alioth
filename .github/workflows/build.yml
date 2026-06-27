@@ -1,0 +1,157 @@
+name: build apk or img
+on:
+  workflow_dispatch:
+    inputs:
+      ui:
+        description: "Desktop Environment"
+        required: true
+        default: "plasma-mobile"
+        type: choice
+        options:
+          - plasma-mobile
+          - sxmo
+          - cosmic
+  push:
+    branches:
+      - main
+jobs:
+  build:
+    runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Clean up space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install parallel zip -y
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Config pmbootstrap
+        run: |
+          set -eux
+          cd /home/runner
+          git clone https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git pmbootstrap
+          cd pmbootstrap
+          git checkout 3.9.0
+          sudo chmod +x "/home/runner/pmbootstrap/pmbootstrap.py"
+          sudo ln -sf /home/runner/pmbootstrap/pmbootstrap.py /usr/local/bin/pmbootstrap
+          ls -lah /home/runner/pmbootstrap
+          pmbootstrap --version
+
+      - name: Copy config 
+        run: |
+          set -eux
+          mkdir -p /home/runner/.config\
+          # 复制构建配置
+          cp pmbootstrap_v3.cfg /home/runner/.config/
+          # 更新桌面环境(默认plasma-mobile)
+          sed -i "s/^ui = .*/ui = ${{ inputs.ui || 'plasma-mobile' }}/" ~/.config/pmbootstrap_v3.cfg
+          #如果选择了 cosmic 桌面，强制将音频后端改为 pipewire 以避免冲突
+          if [ "${{ inputs.ui || 'plasma-mobile' }}" = "cosmic" ]; then
+            sed -i "s/postmarketos-base-ui-audio-backend = pulseaudio/postmarketos-base-ui-audio-backend = pipewire/g" ~/.config/pmbootstrap_v3.cfg
+          fi
+          echo "Current ui:" ${{ inputs.ui || 'plasma-mobile' }}
+          mkdir -p /home/runner/.local/var/pmbootstrap/cache_git
+          git clone https://gitlab.postmarketos.org/postmarketOS/pmaports.git /home/runner/.local/var/pmbootstrap/cache_git/pmaports
+          echo "8" > /home/runner/.local/var/pmbootstrap/version
+          # 复制设备文件
+          cp -rf pmaports-alioth/device-xiaomi-alioth /home/runner/.local/var/pmbootstrap/cache_git/pmaports/device/testing/
+          # 复制驱动文件
+          cp -rf pmaports-alioth/firmware-xiaomi-alioth /home/runner/.local/var/pmbootstrap/cache_git/pmaports/device/testing/
+          # 复制内核文件
+          cp -rf pmaports-alioth/linux-postmarketos-qcom-sm8250-alioth /home/runner/.local/var/pmbootstrap/cache_git/pmaports/device/testing/
+      
+      - name: Cache pmbootstrap
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.local/var/pmbootstrap/cache_apk_aarch64
+            /home/runner/.local/var/pmbootstrap/cache_apk_x86_64
+            /home/runner/.local/var/pmbootstrap/cache_appstream
+            /home/runner/.local/var/pmbootstrap/cache_ccache_x86_64
+            /home/runner/.local/var/pmbootstrap/cache_distfiles
+            /home/runner/.local/var/pmbootstrap/cache_go
+            /home/runner/.local/var/pmbootstrap/cache_http
+            /home/runner/.local/var/pmbootstrap/cache_rust
+            /home/runner/.local/var/pmbootstrap/cache_sccache
+            /home/runner/.local/var/pmbootstrap/chroot_native/home/pmos/build
+          key: pmbootstrap-alioth-${{ github.run_number }}
+          restore-keys: |
+            pmbootstrap-alioth-
+
+      - name: Checksum and build apk
+        run: |
+          set -eux
+          # 校验并构建驱动
+          parallel --line-buffer --halt now,done=1 ::: "pmbootstrap checksum firmware-xiaomi-alioth" "pmbootstrap log"
+          parallel --line-buffer --halt now,done=1 ::: "pmbootstrap build firmware-xiaomi-alioth" "pmbootstrap log"
+          pmbootstrap build firmware-xiaomi-alioth
+          # 校验并构建内核
+          parallel --line-buffer --halt now,done=1 ::: "pmbootstrap checksum linux-postmarketos-qcom-sm8250-alioth" "pmbootstrap log"
+          parallel --line-buffer --halt now,done=1 ::: "pmbootstrap build linux-postmarketos-qcom-sm8250-alioth" "pmbootstrap log"
+          # 校验并构建设备包
+          parallel --line-buffer --halt now,done=1 ::: "pmbootstrap checksum device-xiaomi-alioth" "pmbootstrap log"
+          parallel --line-buffer --halt now,done=1 ::: "pmbootstrap build device-xiaomi-alioth" "pmbootstrap log"
+          # 仅保留仓库没有的驱动/内核/内核/设备索引
+          cp /home/runner/.local/var/pmbootstrap/packages/edge/aarch64/APKINDEX.tar.gz /home/runner/
+          cd /home/runner/ && tar -zxvf APKINDEX.tar.gz
+          awk '
+          BEGIN { RS=""; ORS="\n\n" }
+          /P:device-xiaomi-alioth/ { print $0; next }
+          /P:firmware-xiaomi-alioth-sensors/ { print $0; next }
+          /P:firmware-xiaomi-alioth/ { print $0; next }
+          /P:linux-postmarketos-qcom-sm8250-alioth/ { print $0; next }
+          ' APKINDEX > APKINDEX.tmp && mv APKINDEX.tmp APKINDEX
+          sed -i ':a; /^\n*$/{$d; N; ba}' APKINDEX
+          tar -czvf APKINDEX.tar.gz .SIGN.RSA.pmos@local-6a3a7d2c.rsa.pub APKINDEX DESCRIPTION
+          mv /home/runner/APKINDEX.tar.gz "$GITHUB_WORKSPACE/edge/aarch64/"
+          # 复制构建的apk
+          cp -af /home/runner/.local/var/pmbootstrap/packages/edge/aarch64/{device-xiaomi-alioth-*.apk,firmware-xiaomi-alioth-*.apk,linux-postmarketos-qcom-sm8250-alioth-*.apk} "$GITHUB_WORKSPACE/edge/aarch64/"
+
+      # - name: Build img
+      #   if: github.event_name == 'workflow_dispatch'
+      #   env:
+      #     UI: ${{ inputs.ui || 'plasma-mobile' }}
+      #   run: |
+      #     set -eux
+      #     pmbootstrap install --password mins
+      #     mkdir -p /home/runner
+      #     sudo mv /home/runner/.local/var/pmbootstrap/chroot_rootfs_xiaomi-alioth/boot/boot.img /home/runner
+      #     sudo mv /home/runner/.local/var/pmbootstrap/chroot_native/home/pmos/rootfs/xiaomi-alioth.img /home/runner
+      #     cd /home/runner && zip "postmarketos-alioth-img-${UI}.zip" *.img
+
+
+      # - name: Upload Release
+      #   if: github.event_name == 'workflow_dispatch'
+      #   uses: softprops/action-gh-release@v2
+      #   with:
+      #     tag_name: 1.0.0
+      #     name: latest
+      #     prerelease: true
+      #     make_latest: true
+      #     overwrite_files: true
+      #     files: "/home/runner/postmarketos-alioth-img-${{ inputs.ui || 'plasma-mobile' }}.zip"
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v6
+        with:
+          commit_message: auto build [skip ci]
+          commit_user_name: github-actions[bot]
+          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
