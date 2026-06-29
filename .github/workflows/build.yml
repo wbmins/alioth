@@ -1,16 +1,16 @@
 name: build apk or img
 on:
-  workflow_dispatch:
-    inputs:
-      ui:
-        description: "Desktop Environment"
-        required: true
-        default: "plasma-mobile"
-        type: choice
-        options:
-          - plasma-mobile
-          - sxmo
-          - cosmic
+  # workflow_dispatch:
+  #   inputs:
+  #     ui:
+  #       description: "Desktop Environment"
+  #       required: true
+  #       default: "plasma-mobile"
+  #       type: choice
+  #       options:
+  #         - plasma-mobile
+  #         - sxmo
+  #         - cosmic
   push:
     branches:
       - main
@@ -89,7 +89,6 @@ jobs:
             /home/runner/.local/var/pmbootstrap/cache_http
             /home/runner/.local/var/pmbootstrap/cache_rust
             /home/runner/.local/var/pmbootstrap/cache_sccache
-            /home/runner/.local/var/pmbootstrap/chroot_native/home/pmos/build
           key: pmbootstrap-alioth-${{ github.run_number }}
           restore-keys: |
             pmbootstrap-alioth-
@@ -109,17 +108,21 @@ jobs:
           parallel --line-buffer --halt now,done=1 ::: "pmbootstrap build device-xiaomi-alioth" "pmbootstrap log"
           # 仅保留仓库没有的驱动/内核/内核/设备索引
           cp /home/runner/.local/var/pmbootstrap/packages/edge/aarch64/APKINDEX.tar.gz /home/runner/
-          cd /home/runner/ && tar -zxvf APKINDEX.tar.gz
+          mkdir -p /home/runner/KEY && tar -zxvf /home/runner/APKINDEX.tar.gz -C /home/runner/KEY && cd /home/runner/KEY
           awk '
           BEGIN { RS=""; ORS="\n\n" }
           /P:device-xiaomi-alioth/ { print $0; next }
           /P:firmware-xiaomi-alioth-sensors/ { print $0; next }
           /P:firmware-xiaomi-alioth/ { print $0; next }
           /P:linux-postmarketos-qcom-sm8250-alioth/ { print $0; next }
-          ' APKINDEX > APKINDEX.tmp && mv APKINDEX.tmp APKINDEX
-          sed -i ':a; /^\n*$/{$d; N; ba}' APKINDEX
-          tar -czvf APKINDEX.tar.gz .SIGN.RSA.pmos@local-6a3a7d2c.rsa.pub APKINDEX DESCRIPTION
-          mv /home/runner/APKINDEX.tar.gz "$GITHUB_WORKSPACE/edge/aarch64/"
+          ' APKINDEX > APKINDEX.tmp && mv APKINDEX.tmp APKINDEX && sed -i ':a; /^\n*$/{$d; N; ba}' APKINDEX
+          rm -rf "$GITHUB_WORKSPACE/edge/aarch64/*"
+          tar -czvf "$GITHUB_WORKSPACE/edge/aarch64/APKINDEX.tar.gz" -C /home/runner/KEY .
+          # 更新密钥
+          PMOS_KEY=$(ls /home/runner/.local/var/pmbootstrap/config_abuild/pmos@local*.rsa.pub | head -n 1)
+          FILENAME=$(basename "$PMOS_KEY")
+          cp "$PMOS_KEY" "$GITHUB_WORKSPACE/edge/aarch64/"
+          sed -E -i 's#pmos@local-.*\.rsa\.pub#$FILENAME#' "$GITHUB_WORKSPACE/readme.txt"
           # 复制构建的apk
           cp -af /home/runner/.local/var/pmbootstrap/packages/edge/aarch64/{device-xiaomi-alioth-*.apk,firmware-xiaomi-alioth-*.apk,linux-postmarketos-qcom-sm8250-alioth-*.apk} "$GITHUB_WORKSPACE/edge/aarch64/"
 
