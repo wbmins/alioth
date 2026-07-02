@@ -15,7 +15,7 @@ on:
     branches:
       - main
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 concurrency:
@@ -24,8 +24,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-22.04-arm
-    permissions:
-      contents: write
     steps:
       - name: Clean up space
         uses: jlumbroso/free-disk-space@main
