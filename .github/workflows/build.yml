@@ -14,6 +14,13 @@ on:
   push:
     branches:
       - main
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-22.04-arm
@@ -112,21 +119,22 @@ jobs:
           # 校验并构建设备包
           parallel --line-buffer --halt now,done=1 ::: "pmbootstrap checksum device-xiaomi-alioth" "pmbootstrap log"
           parallel --line-buffer --halt now,done=1 ::: "pmbootstrap build device-xiaomi-alioth" "pmbootstrap log"
-          # 仅保留仓库没有的驱动/内核/内核/设备索引
-          cp /home/runner/.local/var/pmbootstrap/packages/edge/aarch64/APKINDEX.tar.gz /home/runner/
-          mkdir -p /home/runner/KEY && tar -zxvf /home/runner/APKINDEX.tar.gz -C /home/runner/KEY && cd /home/runner/KEY
-          awk '
-          BEGIN { RS=""; ORS="\n\n" }
-          /P:device-xiaomi-alioth/ { print $0; next }
-          /P:firmware-xiaomi-alioth-sensors/ { print $0; next }
-          /P:firmware-xiaomi-alioth/ { print $0; next }
-          /P:linux-postmarketos-qcom-sm8250-alioth/ { print $0; next }
-          ' APKINDEX > APKINDEX.tmp && mv APKINDEX.tmp APKINDEX && sed -i ':a; /^\n*$/{$d; N; ba}' APKINDEX
-          rm -rf "$GITHUB_WORKSPACE/edge/aarch64/*.apk"
-          rm -rf "$GITHUB_WORKSPACE/edge/aarch64/*.tar.gz"
-          tar -czvf "$GITHUB_WORKSPACE/edge/aarch64/APKINDEX.tar.gz" -C /home/runner/KEY .
-          # 复制构建的apk
-          cp -af /home/runner/.local/var/pmbootstrap/packages/edge/aarch64/{device-xiaomi-alioth-*.apk,firmware-xiaomi-alioth-*.apk,linux-postmarketos-qcom-sm8250-alioth-*.apk} "$GITHUB_WORKSPACE/edge/aarch64/"
+      
+      - name: Gen index and sign
+        run: |
+          sudo mkdir -p /home/runner/.local/var/pmbootstrap/chroot_native/apks
+          sudo cp /home/runner/.local/var/pmbootstrap/packages/edge/aarch64/{device-xiaomi-alioth-*.apk,firmware-xiaomi-alioth-*.apk,linux-postmarketos-qcom-sm8250-alioth-*.apk} /home/runner/.local/var/pmbootstrap/chroot_native/apks/
+          pmbootstrap chroot -- sh -c '
+          cd /apks
+          apk index \
+              --keys-dir /mnt/pmbootstrap/abuild-config \
+              -o APKINDEX.tar.gz \
+              *.apk
+          abuild-sign \
+              -k /mnt/pmbootstrap/abuild-config/pmos@mins.rsa \
+              APKINDEX.tar.gz
+          '
+          sudo cp /home/runner/.local/var/pmbootstrap/chroot_native/apks/* "$GITHUB_WORKSPACE/edge/aarch64/"
 
       # - name: Build img
       #   if: github.event_name == 'workflow_dispatch'
@@ -160,3 +168,11 @@ jobs:
           commit_message: auto build [skip ci]
           commit_user_name: github-actions[bot]
           commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - uses: actions/deploy-pages@v4
